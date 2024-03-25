@@ -7,6 +7,13 @@
 #include "Common/UploadBuffer.h"
 #include "Common/GeometryGenerator.h"
 #include "FrameResource.h"
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <imgui_impl_win32.h>
+#include <imgui_impl_dx12.h>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -61,10 +68,14 @@ public:
 
     virtual bool Initialize()override;
 
+
+	LRESULT MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) override;
+
 private:
     virtual void OnResize()override;
     virtual void Update(const GameTimer& gt)override;
     virtual void Draw(const GameTimer& gt)override;
+	virtual float AspectRatio()const override;
 
     virtual void OnMouseDown(WPARAM btnState, int x, int y)override;
     virtual void OnMouseUp(WPARAM btnState, int x, int y)override;
@@ -90,8 +101,14 @@ private:
 
 	std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> GetStaticSamplers();
 
-private:
 
+	void ResizeRTBuffers(int width, int height);
+
+
+	D3D12_CPU_DESCRIPTOR_HANDLE RTTView()const;
+
+private:
+	ImVec2 oldSize =ImVec2(0,0);
     std::vector<std::unique_ptr<FrameResource>> mFrameResources;
     FrameResource* mCurrFrameResource = nullptr;
     int mCurrFrameResourceIndex = 0;
@@ -106,7 +123,7 @@ private:
 	std::unordered_map<std::string, std::unique_ptr<Material>> mMaterials;
 	std::unordered_map<std::string, std::unique_ptr<Texture>> mTextures;
 	std::unordered_map<std::string, ComPtr<ID3DBlob>> mShaders;
-
+	Microsoft::WRL::ComPtr<ID3D12Resource> mRTTTexture;
     std::vector<D3D12_INPUT_ELEMENT_DESC> mInputLayout;
 
     ComPtr<ID3D12PipelineState> mOpaquePSO = nullptr;
@@ -160,6 +177,9 @@ ImguiMultiViewApp::ImguiMultiViewApp(HINSTANCE hInstance)
 
 ImguiMultiViewApp::~ImguiMultiViewApp()
 {
+	ImGui_ImplDX12_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
     if(md3dDevice != nullptr)
         FlushCommandQueue();
 }
@@ -180,6 +200,21 @@ bool ImguiMultiViewApp::Initialize()
 	LoadTextures();
     BuildRootSignature();
 	BuildDescriptorHeaps();
+
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+	ImGui_ImplWin32_Init(mhMainWnd);
+	ImGui_ImplDX12_Init(md3dDevice.Get(), SwapChainBufferCount, mBackBufferFormat, mSrvDescriptorHeap.Get(),
+		CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), 1, mCbvSrvDescriptorSize),
+		CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), 1, mCbvSrvDescriptorSize));
+
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
 	BuildMaterials();
@@ -198,6 +233,33 @@ bool ImguiMultiViewApp::Initialize()
     return true;
 }
  
+LRESULT ImguiMultiViewApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+	if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+	{
+		return true;
+	}
+	if (msg == WM_ACTIVATE)
+	{
+		return 0;
+	}
+	if (msg == WM_MOUSEMOVE)
+	{
+		const ImGuiIO& io = ImGui::GetIO();
+// 		if (io.WantCaptureMouse && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+// 			msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MBUTTONDOWN || 
+// 			msg == WM_MBUTTONUP || msg == WM_MOUSEWHEEL || msg == WM_MOUSEMOVE)) {
+// 			return ERROR_SUCCESS;
+// 		}
+// 
+		if (io.WantCaptureMouse)
+		{
+			return 0;
+		}
+	}
+	return D3DApp::MsgProc(hwnd, msg, wParam, lParam);
+}
+
 void ImguiMultiViewApp::OnResize()
 {
     D3DApp::OnResize();
@@ -234,29 +296,99 @@ void ImguiMultiViewApp::Update(const GameTimer& gt)
 
 void ImguiMultiViewApp::Draw(const GameTimer& gt)
 {
-    auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
+	ImGui_ImplDX12_NewFrame();
+	ImGui_ImplWin32_NewFrame();
+	ImGui::NewFrame();
 
-    // Reuse the memory associated with command recording.
-    // We can only reset when the associated command lists have finished execution on the GPU.
-    ThrowIfFailed(cmdListAlloc->Reset());
+ 	static ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_None | ImGuiDockNodeFlags_NoWindowMenuButton;
+ 	static ImGuiID dock_up_id = 0;
+ 	static ImGuiID dock_down_id = 0;
+	// DockSpaceOverViewport 是附着在window上面的dockpanel 必须每帧调用
+	auto dockspaceID = ImGui::DockSpaceOverViewport(0, 0, 0);
+	//一旦启动后，只是调用一次，也就是分割
+ 	if (dock_up_id==0) {
+		// 但是有可能是恢复的导致 已经有了childnode，因此需要清空所有child节点
+		ImGui::DockBuilderRemoveNodeChildNodes(dockspaceID);
+ 		ImGuiID dock_main_id = dockspaceID;
+ 		dock_up_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.3f, nullptr, &dock_main_id);
+ 		dock_down_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.3f, nullptr, &dock_main_id);
+ 		ImGui::DockBuilderDockWindow("Dear ImGui Demo", dock_up_id);
+ 		ImGui::DockBuilderDockWindow("Hello, world!", dock_down_id);
+		ImGui::DockBuilderDockWindow("viewpoint", dock_main_id);
+ 		ImGui::DockBuilderFinish(dockspaceID);
+ 	}
 
-    // A command list can be reset after it has been added to the command queue via ExecuteCommandList.
-    // Reusing the command list reuses memory.
-    ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+	bool show_demo_window = true;
+	ImGui::ShowDemoWindow(&show_demo_window);
 
-    mCommandList->RSSetViewports(1, &mScreenViewport);
-    mCommandList->RSSetScissorRects(1, &mScissorRect);
 
-    // Indicate a state transition on the resource usage.
-	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
-		D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+	ImGui::Begin("Hello, world!",0);
+	ImGui::Image((void*)(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr), ImVec2(512, 512));
+	ImGui::End();
 
-    // Clear the back buffer and depth buffer.
-    mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
-    mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+	
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0)); // 设置内边距为 (20, 20)
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+	ImGui::Begin("viewpoint",0, ImGuiWindowFlags_NoTitleBar);
 
-    // Specify the buffers we are going to render to.
-    mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, &DepthStencilView());
+	//static ImVec2 oldSize = ImVec2(mClientWidth, mClientHeight);
+	ImVec2 Size = ImGui::GetWindowSize();
+	if (Size.x !=oldSize.x || Size.y !=oldSize.y)
+	{
+		oldSize = Size;
+		ResizeRTBuffers(Size.x,Size.y);
+	}
+	CD3DX12_GPU_DESCRIPTOR_HANDLE viewimg(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), 2, mCbvSrvDescriptorSize);
+	ImGui::Image((void*)(viewimg.ptr), Size);
+	if (ImGui::IsWindowHovered())
+	{
+		static bool isMouseButtonDown = false;
+		ImVec2 Pos = ImGui::GetMousePos();
+		ImVec2 WindowPos = ImGui::GetWindowPos();
+		Pos.x -= WindowPos.x;
+		Pos.y -= WindowPos.y;
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+			// 设置标志表示点击了窗口
+			OnMouseDown(0, Pos.x, Pos.y);
+			isMouseButtonDown = true;
+		}
+		if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+		{
+			isMouseButtonDown = false;
+			OnMouseUp(0, Pos.x, Pos.y);
+		}
+		if (isMouseButtonDown)
+		{
+			OnMouseMove(MK_LBUTTON, Pos.x, Pos.y);
+		}
+	}
+	ImGui::End();
+	ImGui::PopStyleVar(2);
+
+
+	auto cmdListAlloc = mCurrFrameResource->CmdListAlloc;
+
+	// Reuse the memory associated with command recording.
+	// We can only reset when the associated command lists have finished execution on the GPU.
+	ThrowIfFailed(cmdListAlloc->Reset());
+
+	// A command list can be reset after it has been added to the command queue via ExecuteCommandList.
+	// Reusing the command list reuses memory.
+	ThrowIfFailed(mCommandList->Reset(cmdListAlloc.Get(), mOpaquePSO.Get()));
+
+	mCommandList->RSSetViewports(1, &mScreenViewport);
+	mCommandList->RSSetScissorRects(1, &mScissorRect);
+	
+	// Indicate a state transition on the resource usage.
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mRTTTexture.Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+
+	// Clear the back buffer and depth buffer.
+	mCommandList->ClearRenderTargetView(RTTView(), Colors::LightSteelBlue, 0, nullptr);
+	mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+	
+	// Specify the buffers we are going to render to.
+	mCommandList->OMSetRenderTargets(1, &RTTView(), true, &DepthStencilView());
 
 	ID3D12DescriptorHeap* descriptorHeaps[] = { mSrvDescriptorHeap.Get() };
 	mCommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
@@ -266,7 +398,27 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
 	auto passCB = mCurrFrameResource->PassCB->Resource();
 	mCommandList->SetGraphicsRootConstantBufferView(2, passCB->GetGPUVirtualAddress());
 
+	
+	//绘制场景
     DrawRenderItems(mCommandList.Get(), mOpaqueRitems);
+// 
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mRTTTexture.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
+		D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET));
+
+	// Clear the back buffer and depth buffer.
+	mCommandList->ClearRenderTargetView(CurrentBackBufferView(), Colors::LightSteelBlue, 0, nullptr);
+//	mCommandList->ClearDepthStencilView(DepthStencilView(), D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+
+	// Specify the buffers we are going to render to.
+	mCommandList->OMSetRenderTargets(1, &CurrentBackBufferView(), true, nullptr);
+
+
+	//渲染UI
+	ImGui::Render();
+	ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), mCommandList.Get());
+
 
     // Indicate a state transition on the resource usage.
 	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(CurrentBackBuffer(),
@@ -278,9 +430,13 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
     // Add the command list to the queue for execution.
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
-
+	ImGuiIO& io = ImGui::GetIO();
+ 	if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+ 		ImGui::UpdatePlatformWindows();
+ 		ImGui::RenderPlatformWindowsDefault(nullptr, (void*)mCommandList.Get());
+ 	}
     // Swap the back and front buffers
-    ThrowIfFailed(mSwapChain->Present(0, 0));
+    ThrowIfFailed(mSwapChain->Present(1, 0));
 	mCurrBackBuffer = (mCurrBackBuffer + 1) % SwapChainBufferCount;
 
     // Advance the fence value to mark commands up to this fence point.
@@ -290,6 +446,11 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
     // Because we are on the GPU timeline, the new fence point won't be 
     // set until the GPU finishes processing all the commands prior to this Signal().
     mCommandQueue->Signal(mFence.Get(), mCurrentFence);
+}
+
+float ImguiMultiViewApp::AspectRatio() const
+{
+	return static_cast<float>(oldSize.x) / oldSize.y;
 }
 
 void ImguiMultiViewApp::OnMouseDown(WPARAM btnState, int x, int y)
@@ -505,7 +666,7 @@ void ImguiMultiViewApp::BuildDescriptorHeaps()
 	// Create the SRV heap.
 	//
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 1;
+	srvHeapDesc.NumDescriptors = 3;
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	ThrowIfFailed(md3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&mSrvDescriptorHeap)));
@@ -751,3 +912,118 @@ std::array<const CD3DX12_STATIC_SAMPLER_DESC, 6> ImguiMultiViewApp::GetStaticSam
 		anisotropicWrap, anisotropicClamp };
 }
 
+void ImguiMultiViewApp::ResizeRTBuffers(int width, int height)
+{
+	FlushCommandQueue();
+
+	ThrowIfFailed(mCommandList->Reset(mDirectCmdListAlloc.Get(), nullptr));
+
+	mDepthStencilBuffer.Reset();
+	mRTTTexture.Reset();
+	// Create the depth/stencil buffer and view.
+	D3D12_RESOURCE_DESC depthStencilDesc;
+	depthStencilDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	depthStencilDesc.Alignment = 0;
+	depthStencilDesc.Width = width;
+	depthStencilDesc.Height = height;
+	depthStencilDesc.DepthOrArraySize = 1;
+	depthStencilDesc.MipLevels = 1;
+
+	// Correction 11/12/2016: SSAO chapter requires an SRV to the depth buffer to read from 
+	// the depth buffer.  Therefore, because we need to create two views to the same resource:
+	//   1. SRV format: DXGI_FORMAT_R24_UNORM_X8_TYPELESS
+	//   2. DSV Format: DXGI_FORMAT_D24_UNORM_S8_UINT
+	// we need to create the depth buffer resource with a typeless format.  
+	depthStencilDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+
+	depthStencilDesc.SampleDesc.Count = m4xMsaaState ? 4 : 1;
+	depthStencilDesc.SampleDesc.Quality = m4xMsaaState ? (m4xMsaaQuality - 1) : 0;
+	depthStencilDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	depthStencilDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE optClear;
+	optClear.Format = mDepthStencilFormat;
+	optClear.DepthStencil.Depth = 1.0f;
+	optClear.DepthStencil.Stencil = 0;
+	ThrowIfFailed(md3dDevice->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&depthStencilDesc,
+		D3D12_RESOURCE_STATE_COMMON,
+		&optClear,
+		IID_PPV_ARGS(mDepthStencilBuffer.GetAddressOf())));
+
+	// Create descriptor to mip level 0 of entire resource using the format of the resource.
+	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc;
+	dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+	dsvDesc.Format = mDepthStencilFormat;
+	dsvDesc.Texture2D.MipSlice = 0;
+	md3dDevice->CreateDepthStencilView(mDepthStencilBuffer.Get(), &dsvDesc, DepthStencilView());
+
+	// Transition the resource from its initial state to be used as a depth buffer.
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mDepthStencilBuffer.Get(),
+		D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE));
+
+
+	auto TexDesc = CD3DX12_RESOURCE_DESC::Tex2D(mBackBufferFormat, width, height);
+	TexDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+	//TexDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+	D3D12_CLEAR_VALUE optClear1;
+	optClear1.Format = mBackBufferFormat;
+	std::memcpy(optClear1.Color, &Colors::LightSteelBlue,sizeof(float)*4);
+	md3dDevice->CreateCommittedResource(
+		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		D3D12_HEAP_FLAG_NONE,
+		&TexDesc,
+		D3D12_RESOURCE_STATE_COMMON,
+		&optClear1,
+		IID_PPV_ARGS(&mRTTTexture)
+		);
+	
+	D3D12_RENDER_TARGET_VIEW_DESC rttDesc;
+	rttDesc.Format = mBackBufferFormat;
+	rttDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+	rttDesc.Texture2D.MipSlice = 0;
+	rttDesc.Texture2D.PlaneSlice = 0;
+	md3dDevice->CreateRenderTargetView(mRTTTexture.Get(), &rttDesc, RTTView());
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Format = mBackBufferFormat;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Texture2D.MipLevels = 1;
+	md3dDevice->CreateShaderResourceView(mRTTTexture.Get(), &srvDesc,
+		CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(),2,mCbvSrvDescriptorSize));
+
+
+	mCommandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(mRTTTexture.Get(),
+		D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+
+	// Execute the resize commands.
+	ThrowIfFailed(mCommandList->Close());
+	ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
+	mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
+
+	// Wait until resize is complete.
+	FlushCommandQueue();
+
+	// Update the viewport transform to cover the client area.
+	mScreenViewport.TopLeftX = 0;
+	mScreenViewport.TopLeftY = 0;
+	mScreenViewport.Width = static_cast<float>(width);
+	mScreenViewport.Height = static_cast<float>(height);
+	mScreenViewport.MinDepth = 0.0f;
+	mScreenViewport.MaxDepth = 1.0f;
+
+	mScissorRect = { 0, 0, width, height };
+
+	XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f * MathHelper::Pi, (float)width/height, 1.0f, 1000.0f);
+	XMStoreFloat4x4(&mProj, P);
+
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE ImguiMultiViewApp::RTTView()const
+{
+	return CD3DX12_CPU_DESCRIPTOR_HANDLE(mRtvHeap->GetCPUDescriptorHandleForHeapStart(),3,mRtvDescriptorSize);
+}

@@ -32,8 +32,8 @@ public:
     
 	HINSTANCE AppInst()const;
 	HWND      MainWnd()const;
-	float     AspectRatio()const;
-
+	virtual float     AspectRatio() const;
+	
     bool Get4xMsaaState()const;
     void Set4xMsaaState(bool value);
 
@@ -47,7 +47,7 @@ protected:
 	virtual void OnResize(); 
 	virtual void Update(const GameTimer& gt)=0;
     virtual void Draw(const GameTimer& gt)=0;
-
+	
 	// Convenience overrides for handling mouse input.
 	virtual void OnMouseDown(WPARAM btnState, int x, int y){ }
 	virtual void OnMouseUp(WPARAM btnState, int x, int y)  { }
@@ -102,7 +102,7 @@ protected:
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> mDirectCmdListAlloc;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> mCommandList;
 
-	static const int SwapChainBufferCount = 2;
+	static const int SwapChainBufferCount = 3;
 	int mCurrBackBuffer = 0;
     Microsoft::WRL::ComPtr<ID3D12Resource> mSwapChainBuffer[SwapChainBufferCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> mDepthStencilBuffer;
