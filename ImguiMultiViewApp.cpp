@@ -7,6 +7,7 @@
 #include "Common/UploadBuffer.h"
 #include "Common/GeometryGenerator.h"
 #include "FrameResource.h"
+
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_win32.h>
@@ -204,16 +205,20 @@ bool ImguiMultiViewApp::Initialize()
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
+	ImGui::StyleColorsDark();
 
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	io.ConfigWindowsMoveFromTitleBarOnly = true;
 
 	ImGui_ImplWin32_Init(mhMainWnd);
 	ImGui_ImplDX12_Init(md3dDevice.Get(), SwapChainBufferCount, mBackBufferFormat, mSrvDescriptorHeap.Get(),
 		CD3DX12_CPU_DESCRIPTOR_HANDLE(mSrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), 1, mCbvSrvDescriptorSize),
 		CD3DX12_GPU_DESCRIPTOR_HANDLE(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart(), 1, mCbvSrvDescriptorSize));
+
+	io.Fonts->AddFontFromFileTTF("c:\\Windows\\Fonts\\msyh.ttc", 18.0f, nullptr, io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
 
     BuildShadersAndInputLayout();
     BuildShapeGeometry();
@@ -245,7 +250,7 @@ LRESULT ImguiMultiViewApp::MsgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 	}
 	if (msg == WM_MOUSEMOVE)
 	{
-		const ImGuiIO& io = ImGui::GetIO();
+		ImGuiIO& io = ImGui::GetIO();
 // 		if (io.WantCaptureMouse && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
 // 			msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MBUTTONDOWN || 
 // 			msg == WM_MBUTTONUP || msg == WM_MOUSEWHEEL || msg == WM_MOUSEMOVE)) {
@@ -304,7 +309,7 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
  	static ImGuiID dock_up_id = 0;
  	static ImGuiID dock_down_id = 0;
 	// DockSpaceOverViewport 是附着在window上面的dockpanel 必须每帧调用
-	auto dockspaceID = ImGui::DockSpaceOverViewport(0, 0, 0);
+	auto dockspaceID = ImGui::DockSpaceOverViewport(ImGui::GetWindowViewport(), 0, 0);
 	//一旦启动后，只是调用一次，也就是分割
  	if (dock_up_id==0) {
 		// 但是有可能是恢复的导致 已经有了childnode，因此需要清空所有child节点
@@ -313,26 +318,34 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
  		dock_up_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.3f, nullptr, &dock_main_id);
  		dock_down_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.3f, nullptr, &dock_main_id);
  		ImGui::DockBuilderDockWindow("Dear ImGui Demo", dock_up_id);
- 		ImGui::DockBuilderDockWindow("Hello, world!", dock_down_id);
-		ImGui::DockBuilderDockWindow("viewpoint", dock_main_id);
+ 		ImGui::DockBuilderDockWindow(u8"属性", dock_down_id);
+		ImGui::DockBuilderDockWindow(u8"视口", dock_main_id);
  		ImGui::DockBuilderFinish(dockspaceID);
  	}
 
 	bool show_demo_window = true;
 	ImGui::ShowDemoWindow(&show_demo_window);
+	
 
-
-	ImGui::Begin("Hello, world!",0);
+	ImGui::Begin(u8"属性",0);
 	ImGui::Image((void*)(mSrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr), ImVec2(512, 512));
+	ImGui::LabelText(u8"你是谁！",u8"%s",u8"不知道");
 	ImGui::End();
+ 
 
 	
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0,0)); // 设置内边距为 (20, 20)
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
-	ImGui::Begin("viewpoint",0, ImGuiWindowFlags_NoTitleBar);
+
+
+	ImGui::Begin(u8"视口", 0, ImGuiWindowFlags_NoCollapse);
 
 	//static ImVec2 oldSize = ImVec2(mClientWidth, mClientHeight);
 	ImVec2 Size = ImGui::GetWindowSize();
+	ImVec2 Min= ImGui::GetWindowContentRegionMin();
+	ImVec2 Max = ImGui::GetWindowContentRegionMax();
+	Size.x = Max.x - Min.x;
+	Size.y = Max.y - Min.y;
 	if (Size.x !=oldSize.x || Size.y !=oldSize.y)
 	{
 		oldSize = Size;
@@ -431,10 +444,10 @@ void ImguiMultiViewApp::Draw(const GameTimer& gt)
     ID3D12CommandList* cmdsLists[] = { mCommandList.Get() };
     mCommandQueue->ExecuteCommandLists(_countof(cmdsLists), cmdsLists);
 	ImGuiIO& io = ImGui::GetIO();
- 	if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
- 		ImGui::UpdatePlatformWindows();
- 		ImGui::RenderPlatformWindowsDefault(nullptr, (void*)mCommandList.Get());
- 	}
+	if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+		ImGui::UpdatePlatformWindows();
+		ImGui::RenderPlatformWindowsDefault(nullptr, (void*)mCommandList.Get());
+	}
     // Swap the back and front buffers
     ThrowIfFailed(mSwapChain->Present(1, 0));
 	mCurrBackBuffer = (mCurrBackBuffer + 1) % SwapChainBufferCount;
